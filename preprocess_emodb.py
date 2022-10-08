@@ -5,10 +5,24 @@ import opensmile
 from tqdm import tqdm
 
 from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupShuffleSplit
 import numpy as np
 
 
 class EmoDB_data:
+    """
+    Class to handle the EmoDB data.
+    
+    Methods:
+    ---------
+    _get_file_codes(): list
+        Returns a list of strings with codes for each audiofile that contain info on
+        Actor, Emotion, etc.
+    
+    _interpret_file_codes():
+    
+    
+    """
     def __init__(self):
         package_dir = os.path.dirname(os.path.abspath(__file__))
         self.folder = os.path.join(package_dir, "EmoDB/wav/")
@@ -20,7 +34,10 @@ class EmoDB_data:
         self.sentences = self.get_sentences_info()
         self.emotions = self.get_emotions_info()
         
-    def _get_file_codes(self):
+    def _get_file_codes(self) -> list:
+        """
+        Returns a list of the file_names without the .wav ending
+        """
         file_codes = list()
         for file in self._files:
             f = file.replace(self.folder, "")
@@ -28,14 +45,20 @@ class EmoDB_data:
             file_codes.append(f)
         return file_codes
 
-    def _interpret_file_codes(self):
+    def _interpret_file_codes(self) -> pd.DataFrame:
         """
-        According to Emo-DB website:
+        Interprets the file's names according to Emo-DB website:
 
         Positions 1-2: number of speaker
         Positions 3-5: code for text
         Position 6: emotion (sorry, letter stands for german emotion word)
         Position 7: if there are more than two versions these are numbered a, b, c ....
+        
+        returns
+        -------
+            files_df: pd.DataFrame
+            DataFrame with info on files, with columns "file_name", "code", "speaker", 
+            "text_code", "emotion_code", "version"
         """
         
         files_df = pd.DataFrame()
@@ -48,7 +71,11 @@ class EmoDB_data:
         files_df["version"] = [file_code[6] for file_code in self._file_codes]
         return files_df
         
-    def get_speaker_info(self):
+    def get_speaker_info(self)-> pd.DataFrame:
+        """
+        Returns a DataFrame with info on the speakers:
+            id (index), and columns "gender" and "age"
+        """
         speaker_info = {
             "03": {"gender": "male", "age": "31"},
             "08": {"gender": "female", "age": "34"},
@@ -64,7 +91,11 @@ class EmoDB_data:
         speakers_df = pd.DataFrame(speaker_info).transpose()
         return speakers_df
     
-    def get_sentences_info(self):
+    def get_sentences_info(self)-> pd.DataFrame:
+        """
+        Returns the sentences in german and english based on their EmoDB code in the file names
+        """
+        
         sentences = {
             "a01": {"german": "Der Lappen liegt auf dem Eisschrank.",
                     "english": "The tablecloth is lying on the frigde."},
@@ -90,7 +121,10 @@ class EmoDB_data:
         sentences_df = pd.DataFrame(sentences).transpose()
         return sentences_df
     
-    def get_emotions_info(self):
+    def get_emotions_info(self)-> pd.DataFrame:
+        """
+        Returns a emotional label meant by each letter code in the file names
+        """
         emotions = {
             "W": {"emotion": "anger", "valence": "negative"},
             "L": {"emotion": "boredom", "valence": "negative"},
@@ -103,7 +137,11 @@ class EmoDB_data:
         emotions_df = pd.DataFrame(emotions).transpose()
         return emotions_df
 
-    def _get_audio_info(self, reset=False):
+    def _get_audio_info(self, reset: bool =False) -> pd.DataFrame:
+        """
+        Returns a DataFrame with the opensmile features for each song in the dataset.
+        Computes them again if they are not stored in "EmoDB/opensmile_data.csv"
+        """
         package_dir = os.path.dirname(os.path.abspath(__file__))
         saved_file = os.path.join(package_dir, "EmoDB/opensmile_data.csv")
 
@@ -134,7 +172,42 @@ class EmoDB_data:
         return audio_df
 
 
-    def get_train_test_folds(self, k_folds=5, labeling="emotion"):
+    def get_train_val_test_folds(self, k_folds: int=5, labeling: str="emotion"):        
+        """
+        Returns the necessary datasets for training and testing with the EmoDB dataset.
+        Returns training and validation folds for the X features and y labels, as well as the combined
+        trained and validation set (X_train_val, y_train_val) and the test sets.
+        Train/Test separation and the K_folding of the datasets are based on grouping, not allowing
+        samples by any speeker to be in more than one of the sets at the same time.
+        This assures that voices that are being used in testing were not in the training set, 
+        increasing validity of the empirical risk measurements.
+        
+        Params
+        -------
+        k_folds: int
+            the number of folds in for the training and validation datasets
+        labeling: str
+            either "emotion" of "valence". With "emotion", the emotional labels returned are the
+            original by EmoDB. With "valence", the y labels are transormed to either "positive" or "negative"
+            valence values.
+            
+        
+        Returns
+        -------
+        
+        folds_data:
+            list of dictionaries with keys "X_train", "X_val", "y_train", "y_val" for each k_fold, 
+            where each of these are np.arrays with the training and validation X features and y labels
+        X_train_val:
+            np.array with training and validation features
+        y_train_val:
+            np.array with training and validation labels
+        X_test:
+            np.array with test features
+        y_test:
+            np.array with test labels
+        """
+        
         file_meta = self._interpret_file_codes()
 
         data = self._get_audio_info()
@@ -148,25 +221,68 @@ class EmoDB_data:
 
         file_meta = file_meta.merge(self.emotions, how="left", left_on="emotion_code", right_index=True)
         file_meta = file_meta.merge(self.get_speaker_info(), how="left", left_on="speaker", right_index=True)
-
-        splits = []
         groups = file_meta["speaker"].to_numpy()
+
+        
+        splitter = GroupShuffleSplit(test_size=0.25, n_splits=2, random_state=42)
+        split = splitter.split(data, groups=groups)
+        
+        train_inds, test_inds = next(split)
+        
+        data_train = data.iloc[train_inds]
+        data_test = data.iloc[test_inds]
+        
+        groups_train = groups[train_inds]
+        
+        file_meta_train = file_meta.iloc[train_inds]
+        file_meta_test = file_meta.iloc[test_inds]
+        
+        X_train_val = data_train.to_numpy()
+        y_train_val = file_meta_train[labeling].to_numpy()
+        
+        X_test = data_test.to_numpy()
+        y_test = file_meta_test[labeling].to_numpy()
+        
+        
+        splits = []
+        
         kf = GroupKFold(n_splits=k_folds)
-        for train, test in kf.split(X=data, groups=groups):
-            splits.append({"train": train, "test": test})
+        for train, val in kf.split(X=data_train, groups=groups_train):
+            splits.append({"train": train, "val": val})
 
-        X = data.to_numpy()
-        y = file_meta[labeling].to_numpy()
+        X = data_train.to_numpy()
+        y = file_meta_train[labeling].to_numpy()
 
+        folds_data = []
         for fold in splits:
-            X_train, X_test = X[fold["train"]], X[fold["test"]]
-            y_train, y_test = y[fold["train"]], y[fold["test"]]
+            X_train, X_val = X[fold["train"]], X[fold["val"]]
+            y_train, y_val = y[fold["train"]], y[fold["val"]]
 
-            yield ({"X_train": X_train, "X_test": X_test, "y_train": y_train, "y_test": y_test})
+            folds_data.append({"X_train": X_train, "X_val": X_val, "y_train": y_train, "y_val": y_val})
 
-
+        return folds_data, X_train_val, y_train_val, X_test, y_test
 
     def get_full_training_data(self, labeling="emotion"):
+        """
+        Returns the full data set for traing of the final model
+        
+        Params
+        -------
+        labeling: str
+            either "emotion" of "valence". With "emotion", the emotional labels returned are the
+            original by EmoDB. With "valence", the y labels are transormed to either "positive" or "negative"
+            valence values.
+        
+        Returns
+        -------
+        
+        X: np.array
+            matrix with all the training features dataset. each line is a sample
+        yl: np.array
+            array witha a list of the target labels
+
+        """
+        
         file_meta = self._interpret_file_codes()
 
         data = self._get_audio_info()
